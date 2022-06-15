@@ -2,8 +2,10 @@
 """
 
 import tempfile
-import pytest
+
 import numpy as np
+import pytest
+
 import shap
 from shap.utils import assert_import
 
@@ -12,9 +14,9 @@ try:
 except ImportError:
     pytestmark = pytest.mark.skip("opencv not installed")
 
+
 def test_serialization_image_masker_inpaint_telea():
-    """ Make sure image serialization works with inpaint telea mask.
-    """
+    """Make sure image serialization works with inpaint telea mask."""
 
     test_image_height = 500
     test_image_width = 500
@@ -39,11 +41,13 @@ def test_serialization_image_masker_inpaint_telea():
     mask[4][0] = 0
 
     # comparing masked values
-    assert np.array_equal(original_image_masker(mask, test_data), new_image_masker(mask, test_data))
+    assert np.array_equal(
+        original_image_masker(mask, test_data), new_image_masker(mask, test_data)
+    )
+
 
 def test_serialization_image_masker_inpaint_ns():
-    """ Make sure image serialization works with inpaint ns mask.
-    """
+    """Make sure image serialization works with inpaint ns mask."""
 
     test_image_height = 500
     test_image_width = 500
@@ -68,11 +72,13 @@ def test_serialization_image_masker_inpaint_ns():
     mask[4][0] = 0
 
     # comparing masked values
-    assert np.array_equal(original_image_masker(mask, test_data), new_image_masker(mask, test_data))
+    assert np.array_equal(
+        original_image_masker(mask, test_data), new_image_masker(mask, test_data)
+    )
+
 
 def test_serialization_image_masker_blur():
-    """ Make sure image serialization works with blur mask.
-    """
+    """Make sure image serialization works with blur mask."""
 
     test_image_height = 500
     test_image_width = 500
@@ -97,11 +103,13 @@ def test_serialization_image_masker_blur():
     mask[4][0] = 0
 
     # comparing masked values
-    assert np.array_equal(original_image_masker(mask, test_data), new_image_masker(mask, test_data))
+    assert np.array_equal(
+        original_image_masker(mask, test_data), new_image_masker(mask, test_data)
+    )
+
 
 def test_serialization_image_masker_mask():
-    """ Make sure image serialization works.
-    """
+    """Make sure image serialization works."""
 
     test_image_height = 500
     test_image_width = 500
@@ -127,4 +135,6 @@ def test_serialization_image_masker_mask():
     mask[4][0] = 0
 
     # comparing masked values
-    assert np.array_equal(original_image_masker(mask, test_data), new_image_masker(mask, test_data))
+    assert np.array_equal(
+        original_image_masker(mask, test_data), new_image_masker(mask, test_data)
+    )

@@ -1,16 +1,25 @@
 import numpy as np
 import scipy as sp
-from ._model import Model
+
+from .._serializable import Deserializer, Serializer
 from ..utils import safe_isinstance
 from ..utils.transformers import MODELS_FOR_CAUSAL_LM, getattr_silent
-from .._serializable import Serializer, Deserializer
+from ._model import Model
+
 
 class TopKLM(Model):
-    """ Generates scores (log odds) for the top-k tokens for Causal/Masked LM.
-    """
+    """Generates scores (log odds) for the top-k tokens for Causal/Masked LM."""
 
-    def __init__(self, model, tokenizer, k=10, generate_topk_token_ids=None, batch_size=128, device=None):
-        """ Take Causal/Masked LM model and tokenizer and build a log odds output model for the top-k tokens.
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        k=10,
+        generate_topk_token_ids=None,
+        batch_size=128,
+        device=None,
+    ):
+        """Take Causal/Masked LM model and tokenizer and build a log odds output model for the top-k tokens.
 
         Parameters
         ----------
@@ -52,15 +61,19 @@ class TopKLM(Model):
         self.model_type = None
         if safe_isinstance(self.inner_model, "transformers.PreTrainedModel"):
             self.model_type = "pt"
-            import torch # pylint: disable=import-outside-toplevel
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if self.device is None else self.device
+            import torch  # pylint: disable=import-outside-toplevel
+
+            self.device = (
+                torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                if self.device is None
+                else self.device
+            )
             self.inner_model = self.inner_model.to(self.device)
         elif safe_isinstance(self.inner_model, "transformers.TFPreTrainedModel"):
             self.model_type = "tf"
 
-
     def __call__(self, masked_X, X):
-        """ Computes log odds scores for a given batch of masked inputs for the top-k tokens for Causal/Masked LM.
+        """Computes log odds scores for a given batch of masked inputs for the top-k tokens for Causal/Masked LM.
 
         Parameters
         ----------
@@ -79,7 +92,9 @@ class TopKLM(Model):
         self.update_cache_X(X[:1])
         start_batch_idx, end_batch_idx = 0, len(masked_X)
         while start_batch_idx < end_batch_idx:
-            logits = self.get_lm_logits(masked_X[start_batch_idx:start_batch_idx+self.batch_size])
+            logits = self.get_lm_logits(
+                masked_X[start_batch_idx : start_batch_idx + self.batch_size]
+            )
             logodds = self.get_logodds(logits)
             if output_batch is None:
                 output_batch = logodds
@@ -89,7 +104,7 @@ class TopKLM(Model):
         return output_batch
 
     def update_cache_X(self, X):
-        """ The function updates original input(X) and top-k token ids for the Causal/Masked LM.
+        """The function updates original input(X) and top-k token ids for the Causal/Masked LM.
 
         It mimics the caching mechanism to update the original input and topk token ids
         that are to be explained and which updates for every new row of explanation.
@@ -105,7 +120,7 @@ class TopKLM(Model):
             self.output_names = self.get_output_names_and_update_topk_token_ids(self.X)
 
     def get_output_names_and_update_topk_token_ids(self, X):
-        """ Gets the token names for top-k token ids for Causal/Masked LM.
+        """Gets the token names for top-k token ids for Causal/Masked LM.
 
         Parameters
         ----------
@@ -128,7 +143,7 @@ class TopKLM(Model):
         return output_names
 
     def get_logodds(self, logits):
-        """ Calculates log odds from logits.
+        """Calculates log odds from logits.
 
         This function passes the logits through softmax and then computes log odds for the top-k token ids.
 
@@ -153,8 +168,8 @@ class TopKLM(Model):
         logodds_for_topk_token_ids = np.take(logodds, self.topk_token_ids, axis=-1)
         return logodds_for_topk_token_ids
 
-    def get_inputs(self, X, padding_side='right'):
-        """ The function tokenizes source sentence.
+    def get_inputs(self, X, padding_side="right"):
+        """The function tokenizes source sentence.
 
         Parameters
         ----------
@@ -167,13 +182,15 @@ class TopKLM(Model):
             Dictionary of padded source sentence ids and attention mask as tensors("pt" or "tf" based on similarity_model_type).
         """
         self.tokenizer.padding_side = padding_side
-        inputs = self.tokenizer(X.tolist(), return_tensors=self.model_type, padding=True)
+        inputs = self.tokenizer(
+            X.tolist(), return_tensors=self.model_type, padding=True
+        )
         # set tokenizer padding to default
-        self.tokenizer.padding_side = 'right'
+        self.tokenizer.padding_side = "right"
         return inputs
 
     def generate_topk_token_ids(self, X):
-        """ Generates top-k token ids for Causal/Masked LM.
+        """Generates top-k token ids for Causal/Masked LM.
 
         Parameters
         ----------
@@ -186,11 +203,11 @@ class TopKLM(Model):
             An array of top-k token ids.
         """
         logits = self.get_lm_logits(X)
-        topk_tokens_ids = (-logits).argsort()[0, :self.k]
+        topk_tokens_ids = (-logits).argsort()[0, : self.k]
         return topk_tokens_ids
 
     def get_lm_logits(self, X):
-        """ Evaluates a Causal/Masked LM model and returns logits corresponding to next word/masked word.
+        """Evaluates a Causal/Masked LM model and returns logits corresponding to next word/masked word.
 
         Parameters
         ----------
@@ -205,19 +222,27 @@ class TopKLM(Model):
         if safe_isinstance(self.inner_model, MODELS_FOR_CAUSAL_LM):
             inputs = self.get_inputs(X, padding_side="left")
             if self.model_type == "pt":
-                import torch # pylint: disable=import-outside-toplevel
-                inputs["position_ids"] = (inputs["attention_mask"].long().cumsum(-1) - 1)
+                import torch  # pylint: disable=import-outside-toplevel
+
+                inputs["position_ids"] = inputs["attention_mask"].long().cumsum(-1) - 1
                 inputs["position_ids"].masked_fill_(inputs["attention_mask"] == 0, 0)
                 inputs = inputs.to(self.device)
                 # generate outputs and logits
                 with torch.no_grad():
                     outputs = self.inner_model(**inputs, return_dict=True)
                 # extract only logits corresponding to target sentence ids
-                logits = outputs.logits.detach().cpu().numpy().astype('float64')[:, -1, :]
+                logits = (
+                    outputs.logits.detach().cpu().numpy().astype("float64")[:, -1, :]
+                )
             elif self.model_type == "tf":
-                import tensorflow as tf # pylint: disable=import-outside-toplevel
-                inputs["position_ids"] = tf.math.cumsum(inputs["attention_mask"], axis=-1) - 1
-                inputs["position_ids"] = tf.where(inputs["attention_mask"] == 0, 0, inputs["position_ids"])
+                import tensorflow as tf  # pylint: disable=import-outside-toplevel
+
+                inputs["position_ids"] = (
+                    tf.math.cumsum(inputs["attention_mask"], axis=-1) - 1
+                )
+                inputs["position_ids"] = tf.where(
+                    inputs["attention_mask"] == 0, 0, inputs["position_ids"]
+                )
                 if self.device is None:
                     outputs = self.inner_model(inputs, return_dict=True)
                 else:
@@ -226,7 +251,7 @@ class TopKLM(Model):
                             outputs = self.inner_model(inputs, return_dict=True)
                     except RuntimeError as err:
                         print(err)
-                logits = outputs.logits.numpy().astype('float64')[:, -1, :]
+                logits = outputs.logits.numpy().astype("float64")[:, -1, :]
         return logits
 
     def save(self, out_file):
@@ -246,7 +271,9 @@ class TopKLM(Model):
             return cls._instantiated_load(in_file)
 
         kwargs = super().load(in_file, instantiate=False)
-        with Deserializer(in_file, "shap.models.TextGeneration", min_version=0, max_version=0) as s:
+        with Deserializer(
+            in_file, "shap.models.TextGeneration", min_version=0, max_version=0
+        ) as s:
             kwargs["tokenizer"] = s.load("tokenizer")
             kwargs["k"] = s.load("k")
             kwargs["generate_topk_token_ids"] = s.load("generate_topk_token_ids")

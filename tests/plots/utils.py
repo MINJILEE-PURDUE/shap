@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
+
 import shap
 
 
 @pytest.fixture()
 def explainer():
-    """ A simple explainer to be used as a test fixture.
-    """
-    xgboost = pytest.importorskip('xgboost')
+    """A simple explainer to be used as a test fixture."""
+    xgboost = pytest.importorskip("xgboost")
     np.random.seed(0)
     # get a dataset on income prediction
     X, y = shap.datasets.adult()
