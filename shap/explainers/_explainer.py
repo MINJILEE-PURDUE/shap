@@ -25,7 +25,7 @@ class Explainer(Serializable):
     """
 
     def __init__(self, model, masker=None, link=links.identity, algorithm="auto", output_names=None, feature_names=None, linearize_link=True,
-                 seed=None, **kwargs):
+                 seed=None, max_samples=100, **kwargs):
         """ Build a new explainer for the passed model.
 
         Parameters
@@ -85,7 +85,7 @@ class Explainer(Serializable):
             if algorithm == "partition":
                 self.masker = maskers.Partition(masker)
             else:
-                self.masker = maskers.Independent(masker)
+                self.masker = maskers.Independent(masker, max_samples=max_samples)
         elif safe_isinstance(masker, ["transformers.PreTrainedTokenizer", "transformers.tokenization_utils_base.PreTrainedTokenizerBase"]):
             if is_transformers_lm(self.model):
                 # auto assign text infilling if model is a transformer model with lm head
@@ -95,7 +95,7 @@ class Explainer(Serializable):
         elif (masker is list or masker is tuple) and masker[0] is not str:
             self.masker = maskers.Composite(*masker)
         elif (masker is dict) and ("mean" in masker):
-            self.masker = maskers.Independent(masker)
+            self.masker = maskers.Independent(masker, max_samples=max_samples)
         elif masker is None and isinstance(self.model, models.TransformersPipeline):
             return self.__init__( # pylint: disable=non-parent-init-called
                 self.model, self.model.inner_model.tokenizer,
@@ -199,7 +199,7 @@ class Explainer(Serializable):
 
 
     def __call__(self, *args, max_evals="auto", main_effects=False, error_bounds=False, batch_size="auto",
-                 outputs=None, silent=False, **kwargs):
+                 outputs=None, silent=False, dryrun=False, **kwargs):
         """ Explains the output of model(*args), where args is a list of parallel iteratable datasets.
 
         Note this default version could be an abstract method that is implemented by each algorithm-specific
@@ -218,12 +218,36 @@ class Explainer(Serializable):
         # parse our incoming arguments
         num_rows = None
         args = list(args)
-        if self.feature_names is None:
-            feature_names = [None for _ in range(len(args))]
-        elif issubclass(type(self.feature_names[0]), (list, tuple)):
-            feature_names = copy.deepcopy(self.feature_names)
+        need_main_effects = main_effects
+
+        mode = kwargs.get('mode', '')
+        self.mode = 'row'
+
+        feature_groups = kwargs.get('feature_groups')
+        if feature_groups is not None:
+            group_mask = True
+            feature_names = [k for k in feature_groups]
+            feature_group_list = [feature_groups[k] for k in feature_groups]
         else:
-            feature_names = [copy.deepcopy(self.feature_names)]
+            group_mask = False
+            feature_group_list =  [[i] for i in range(args[0].shape[1])]
+
+            if self.feature_names is None:
+                feature_names = [None for _ in range(len(args))]
+            elif issubclass(type(self.feature_names[0]), (list, tuple)):
+                feature_names = copy.deepcopy(self.feature_names)
+            else:
+                feature_names = [copy.deepcopy(self.feature_names)]
+
+
+        if type(self) is explainers.Permutation and mode == "full":
+            self.mode = 'full'
+            if len(args) != 1 or len(args[0].shape) > 2 :
+                raise Exception("Expecting single 1D inputs for grouping, but got multiple inputs for model!")
+
+        if group_mask:
+            need_interactions = kwargs.get('need_interactions')
+
         for i in range(len(args)):
 
             # try and see if we can get a length from any of the for our progress bar
@@ -235,7 +259,8 @@ class Explainer(Serializable):
 
             # convert DataFrames to numpy arrays
             if safe_isinstance(args[i], "pandas.core.frame.DataFrame"):
-                feature_names[i] = list(args[i].columns)
+                if not group_mask:
+                    feature_names[i] = list(args[i].columns)
                 args[i] = args[i].to_numpy()
 
             # convert nlp Dataset objects to lists
@@ -247,6 +272,8 @@ class Explainer(Serializable):
         if batch_size == "auto":
             if hasattr(self.masker, "default_batch_size"):
                 batch_size = self.masker.default_batch_size
+            elif self.mode == "full":
+                batch_size = 1
             else:
                 batch_size = 10
 
@@ -256,113 +283,155 @@ class Explainer(Serializable):
         expected_values = []
         mask_shapes = []
         main_effects = []
+        interactions = []
         hierarchical_values = []
         clustering = []
         output_names = []
         error_std = []
-        if callable(getattr(self.masker, "feature_names", None)):
-            feature_names = [[] for _ in range(len(args))]
-        for row_args in show_progress(zip(*args), num_rows, self.__class__.__name__+" explainer", silent):
-            row_result = self.explain_row(
-                *row_args, max_evals=max_evals, main_effects=main_effects, error_bounds=error_bounds,
-                batch_size=batch_size, outputs=outputs, silent=silent, **kwargs
-            )
-            values.append(row_result.get("values", None))
-            output_indices.append(row_result.get("output_indices", None))
-            expected_values.append(row_result.get("expected_values", None))
-            mask_shapes.append(row_result["mask_shapes"])
-            main_effects.append(row_result.get("main_effects", None))
-            clustering.append(row_result.get("clustering", None))
-            hierarchical_values.append(row_result.get("hierarchical_values", None))
-            tmp = row_result.get("output_names", None)
-            output_names.append(tmp(*row_args) if callable(tmp) else tmp)
-            error_std.append(row_result.get("error_std", None))
-            if callable(getattr(self.masker, "feature_names", None)):
-                row_feature_names = self.masker.feature_names(*row_args)
-                for i in range(len(row_args)):
-                    feature_names[i].append(row_feature_names[i])
 
-        # split the values up according to each input
-        arg_values = [[] for a in args]
-        for i, v in enumerate(values):
-            pos = 0
-            for j in range(len(args)):
-                mask_length = np.prod(mask_shapes[i][j])
-                arg_values[j].append(values[i][pos:pos+mask_length])
-                pos += mask_length
-
-        # collapse the arrays as possible
-        expected_values = pack_values(expected_values)
-        main_effects = pack_values(main_effects)
-        output_indices = pack_values(output_indices)
-        main_effects = pack_values(main_effects)
-        hierarchical_values = pack_values(hierarchical_values)
-        error_std = pack_values(error_std)
-        clustering = pack_values(clustering)
-
-        # getting output labels
-        ragged_outputs = False
-        if output_indices is not None:
-            ragged_outputs = not all(len(x) == len(output_indices[0]) for x in output_indices)
-        if self.output_names is None:
-            if None not in output_names:
-                if not ragged_outputs:
-                    sliced_labels = np.array(output_names)
-                else:
-                    sliced_labels = [np.array(output_names[i])[index_list] for i,index_list in enumerate(output_indices)]
-            else:
-                sliced_labels = None
-        else:
-            assert output_indices is not None, "You have passed a list for output_names but the model seems to not have multiple outputs!"
-            labels = np.array(self.output_names)
-            sliced_labels = [labels[index_list] for index_list in output_indices]
-            if not ragged_outputs:
-                sliced_labels = np.array(sliced_labels)
-
-        if isinstance(sliced_labels, np.ndarray) and len(sliced_labels.shape) == 2:
-            if np.all(sliced_labels[0,:] == sliced_labels):
-                sliced_labels = sliced_labels[0]
-
-        # allow the masker to transform the input data to better match the masking pattern
-        # (such as breaking text into token segments)
-        if hasattr(self.masker, "data_transform"):
-            new_args = []
-            for row_args in zip(*args):
-                new_args.append([pack_values(v) for v in self.masker.data_transform(*row_args)])
-            args = list(zip(*new_args))
-
-        # build the explanation objects
         out = []
-        for j, data in enumerate(args):
+        if self.mode != 'full':
+            
+            if callable(getattr(self.masker, "feature_names", None)):
+                feature_names = [[] for _ in range(len(args))]
+            for row_args in show_progress(zip(*args), num_rows, self.__class__.__name__+" explainer", silent):
+                row_result = self.explain_row(
+                    *row_args, max_evals=max_evals, main_effects=need_main_effects, error_bounds=error_bounds,
+                    batch_size=batch_size, outputs=outputs, silent=silent, **kwargs
+                )
+                values.append(row_result.get("values", None))
+                output_indices.append(row_result.get("output_indices", None))
+                expected_values.append(row_result.get("expected_values", None))
+                mask_shapes.append(row_result["mask_shapes"])
+                main_effects.append(row_result.get("main_effects", None))
+                clustering.append(row_result.get("clustering", None))
+                hierarchical_values.append(row_result.get("hierarchical_values", None))
+                tmp = row_result.get("output_names", None)
+                output_names.append(tmp(*row_args) if callable(tmp) else tmp)
+                error_std.append(row_result.get("error_std", None))
+                interactions.append(row_result.get("interactions", None))
+                if callable(getattr(self.masker, "feature_names", None)):
+                    row_feature_names = self.masker.feature_names(*row_args)
+                    for i in range(len(row_args)):
+                        feature_names[i].append(row_feature_names[i])
 
-            # reshape the attribution values using the mask_shapes
-            tmp = []
-            for i, v in enumerate(arg_values[j]):
-                if np.prod(mask_shapes[i][j]) != np.prod(v.shape): # see if we have multiple outputs
-                    tmp.append(v.reshape(*mask_shapes[i][j], -1))
+            # split the values up according to each input
+            arg_values = [[] for a in args]
+            for i, v in enumerate(values):
+                pos = 0
+                for j in range(len(args)):
+                    mask_length = np.prod(mask_shapes[i][j])
+                    arg_values[j].append(values[i][pos:pos+mask_length])
+                    pos += mask_length
+
+            # collapse the arrays as possible
+            expected_values = pack_values(expected_values)
+            main_effects = pack_values(main_effects)
+            output_indices = pack_values(output_indices)
+            hierarchical_values = pack_values(hierarchical_values)
+            error_std = pack_values(error_std)
+            clustering = pack_values(clustering)
+            interactions = pack_values(interactions)
+            # getting output labels
+            ragged_outputs = False
+            if output_indices is not None:
+                ragged_outputs = not all(len(x) == len(output_indices[0]) for x in output_indices)
+            if self.output_names is None:
+                if None not in output_names:
+                    if not ragged_outputs:
+                        sliced_labels = np.array(output_names)
+                    else:
+                        sliced_labels = [np.array(output_names[i])[index_list] for i,index_list in enumerate(output_indices)]
                 else:
-                    tmp.append(v.reshape(*mask_shapes[i][j]))
-            arg_values[j] = pack_values(tmp)
+                    sliced_labels = None
+            else:
+                assert output_indices is not None, "You have passed a list for output_names but the model seems to not have multiple outputs!"
+                labels = np.array(self.output_names)
+                sliced_labels = [labels[index_list] for index_list in output_indices]
+                if not ragged_outputs:
+                    sliced_labels = np.array(sliced_labels)
 
-            if feature_names[j] is None:
-                feature_names[j] = ["Feature " + str(i) for i in range(data.shape[1])]
+            if isinstance(sliced_labels, np.ndarray) and len(sliced_labels.shape) == 2:
+                if np.all(sliced_labels[0,:] == sliced_labels):
+                    sliced_labels = sliced_labels[0]
 
+            # allow the masker to transform the input data to better match the masking pattern
+            # (such as breaking text into token segments)
+            if hasattr(self.masker, "data_transform"):
+                new_args = []
+                for row_args in zip(*args):
+                    new_args.append([pack_values(v) for v in self.masker.data_transform(*row_args)])
+                args = list(zip(*new_args))
 
-            # build an explanation object for this input argument
+            # build the explanation objects
+            out = []        
+            for j, data in enumerate(args):
+
+                # reshape the attribution values using the mask_shapes
+                tmp = []
+                for i, v in enumerate(arg_values[j]):
+                    if np.prod(mask_shapes[i][j]) != np.prod(v.shape): # see if we have multiple outputs
+                        tmp.append(v.reshape(*mask_shapes[i][j], -1))
+                    else:
+                        tmp.append(v.reshape(*mask_shapes[i][j]))
+                arg_values[j] = pack_values(tmp)
+
+                if feature_names[j] is None:
+                    feature_names[j] = ["Feature " + str(i) for i in range(data.shape[1])]
+
+                out.append(Explanation(
+                    arg_values[j], expected_values, data,
+                    feature_names=feature_names[j], 
+                    main_effects=main_effects,
+                    clustering=clustering,
+                    hierarchical_values=hierarchical_values,
+                    output_names=sliced_labels, # self.output_names
+                    error_std=error_std,
+                    compute_time=time.time() - start_time,
+                    # output_shape=output_shape,
+                    #lower_bounds=v_min, upper_bounds=v_max
+                    interactions=interactions,
+                    feature_groups = feature_groups
+                ))
+        else:
+
+            full_results = self.explain_full(args, max_evals=max_evals, error_bounds=error_bounds, 
+                                            batch_size=batch_size, outputs=outputs, silent=silent, feature_group_list=feature_group_list, main_effects=need_main_effects, dryrun=dryrun, **kwargs)
+
+            values=full_results.get("values", None)
+            output_indices=full_results.get("output_indices", None)
+            expected_values=full_results.get("expected_values", None)
+            mask_shapes=full_results["mask_shapes"]
+            main_effects=full_results.get("main_effects", None)
+            clustering=full_results.get("clustering", None)
+            hierarchical_values=full_results.get("hierarchical_values", None)
+            output_names=full_results.get("output_names", None)
+            interactions=full_results.get("interactions", None)
+            error_std=full_results.get("error_std", None)
+            if self.output_names is None:
+                sliced_labels = None
+            else:
+                labels = np.array(self.output_names)
+                sliced_labels = np.array([labels[index_list] for index_list in output_indices])
+
             out.append(Explanation(
-                arg_values[j], expected_values, data,
-                feature_names=feature_names[j], main_effects=main_effects,
+                values, expected_values, args[0],
+                feature_names=feature_names, 
+                main_effects=main_effects,
                 clustering=clustering,
                 hierarchical_values=hierarchical_values,
                 output_names=sliced_labels, # self.output_names
                 error_std=error_std,
-                compute_time=time.time() - start_time
+                compute_time=time.time() - start_time,
                 # output_shape=output_shape,
                 #lower_bounds=v_min, upper_bounds=v_max
+                interactions=interactions,
+                feature_groups=feature_groups
             ))
+
         return out[0] if len(out) == 1 else out
 
-    def explain_row(self, *row_args, max_evals, main_effects, error_bounds, outputs, silent, **kwargs):
+    def explain_row(self, *row_args, max_evals, main_effects, error_bounds, batch_size, outputs, silent, **kwargs):
         """ Explains a single row and returns the tuple (row_values, row_expected_values, row_mask_shapes, main_effects).
 
         This is an abstract method meant to be implemented by each subclass.
@@ -378,6 +447,42 @@ class Explainer(Serializable):
         """
         
         return {}
+
+    def gen_rnn_feature_groups(self, shape_in = None, gen_type = "by_feature", names = None ):
+        if shape_in is None:
+            ret_dict = None
+        elif len(shape_in) == 2:
+            ret_dict = {}
+            if gen_type == "by_feature":
+                if type(names) == str:
+                    names = ["{}-{}".format(names, k+1) for k in range(shape_in[1])]
+                elif issubclass(type(names), (list, tuple)) and len(names) == shape_in[1]:
+                    pass
+                else:
+                    names = ["FEATURE-{}".format(k+1) for k in range(shape_in[1])]
+                for i in range(shape_in[1]):
+                    ret_dict[names[i]] = [ k * shape_in[1] + i for k in range(shape_in[0]) ]
+            elif gen_type == "by_sequence":
+                if type(names) == str:
+                    names = ["{}-{}".format(names, k+1) for k in range(shape_in[0])]
+                elif issubclass(type(names), (list, tuple)) and len(names) == shape_in[0]:
+                    pass
+                else:
+                    names = ["SEQ-{}".format(k+1) for k in range(shape_in[0])]
+                for i in range(shape_in[0]):
+                    ret_dict[names[i]] = [ i * shape_in[1] + k for k in range(shape_in[1]) ]
+
+        elif len(shape_in) == 1:
+            if type(names) == str:
+                names = ["{}-{}".format(names, k) for k in range(shape_in[0])]
+            elif issubclass(type(names), (list, tuple)) and len(names) == shape_in[0]:
+                pass
+            else:
+                names = ["FEATURE-{}".format(k) for k in range(shape_in[0])]            
+            ret_dict = {names[k]: [k] for k in range(shape_in[0])}
+        
+        return ret_dict
+            
 
     @staticmethod
     def supports_model_with_masker(model, masker):

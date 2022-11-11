@@ -98,7 +98,9 @@ class Explanation(metaclass=MetaExplanation):
         main_effects=None,
         hierarchical_values=None,
         clustering=None,
-        compute_time=None
+        compute_time=None,
+        interactions = None,
+        feature_groups = None,
     ):
         self.op_history = []
 
@@ -162,7 +164,9 @@ class Explanation(metaclass=MetaExplanation):
             error_std=list_wrap(error_std),
             main_effects=list_wrap(main_effects),
             hierarchical_values=list_wrap(hierarchical_values),
-            clustering=None if clustering is None else Obj(clustering, [0])
+            clustering=None if clustering is None else Obj(clustering, [0]),
+            interactions = interactions,
+            feature_groups = feature_groups
         )
 
     @property
@@ -283,6 +287,20 @@ class Explanation(metaclass=MetaExplanation):
     @clustering.setter
     def clustering(self, new_clustering):
         self._s.clustering = new_clustering
+
+    @property
+    def interactions(self):
+        return self._s.interactions
+    @interactions.setter
+    def interactions(self, new_interactions):
+        self._s.interactions = new_interactions
+
+    @property
+    def feature_groups(self):
+        return self._s.feature_groups
+    @feature_groups.setter
+    def feature_groups(self, new_feature_groups):
+        self._s.feature_groups = new_feature_groups        
 
     def cohorts(self, cohorts):
         """ Split this explanation into several cohorts.
@@ -431,6 +449,10 @@ class Explanation(metaclass=MetaExplanation):
         return self.shape[0]
 
     def __copy__(self):
+        if not hasattr(self, "interactions"):
+            self.interactions=None
+        if not hasattr(self, "feature_groups"):
+            self.feature_groups=None
         new_exp = Explanation(
             self.values,
             self.base_values,
@@ -445,7 +467,10 @@ class Explanation(metaclass=MetaExplanation):
             self.error_std,
             self.main_effects,
             self.hierarchical_values,
-            self.clustering
+            self.clustering,
+            self.compute_time,
+            self.interactions,
+            self.feature_groups
         )
         new_exp.op_history = copy.copy(self.op_history)
         return new_exp
@@ -706,6 +731,11 @@ class Explanation(metaclass=MetaExplanation):
 
 def group_features(shap_values, feature_map):
     # TODOsomeday: support and deal with clusterings
+
+    if shap_values.feature_groups is not None:
+        raise Exception("Cannot group features on a groupped explaination.")
+        return shap_values
+
     reverse_map = {}
     for name in feature_map:
         reverse_map[feature_map[name]] = reverse_map.get(feature_map[name], []) + [name]
@@ -748,7 +778,9 @@ def group_features(shap_values, feature_map):
         error_std = None,
         main_effects = None,
         hierarchical_values = None,
-        clustering = None
+        clustering = None,
+        interactions = None,
+        feature_groups = feature_map
     )
 
 def compute_output_dims(values, base_values, data, output_names):
