@@ -8,6 +8,7 @@
 ![example workflow](https://github.com/slundberg/shap/actions/workflows/run_tests.yml/badge.svg)
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/slundberg/shap/master)
 [![Documentation Status](https://readthedocs.org/projects/shap/badge/?version=latest)](https://shap.readthedocs.io/en/latest/?badge=latest)
+[![Codecov](https://codecov.io/gh/slundberg/shap/branch/master/graph/badge.svg)](https://codecov.io/gh/slundberg/shap)
 
 **SHAP (SHapley Additive exPlanations)** is a game theoretic approach to explain the output of any machine learning model. It connects optimal credit allocation with local explanations using the classic Shapley values from game theory and their related extensions (see [papers](#citations) for details and citations).
 
