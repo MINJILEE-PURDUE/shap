@@ -1,8 +1,10 @@
 import logging
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 from numba import njit
+from sklearn.impute import KNNImputer, SimpleImputer
 
 from .. import utils
 from .._serializable import Deserializer, Serializer
@@ -17,7 +19,7 @@ class Tabular(Masker):
     """ A common base class for Independent and Partition.
     """
 
-    def __init__(self, data, max_samples=100, clustering=None):
+    def __init__(self, data, max_samples=100, clustering=None, impute=None):
         """ This masks out tabular features by integrating over the given background dataset.
 
         Parameters
@@ -60,6 +62,16 @@ class Tabular(Masker):
         self.data = data
         self.clustering = clustering
         self.max_samples = max_samples
+
+        # prepare by fitting sklearn imputer
+        self.impute = impute
+        if self.impute is not None:
+            if len(self.data.shape) == 1:
+                self.impute.fit(self.data.reshape(1, -1))
+            elif len(self.data.shape) == 2:
+                self.impute.fit(self.data)
+            elif len(self.data.shape) >= 2:
+                raise NotImplementedError(f"Currently only 1 and 2 dimensional data can by processed with the LinearImpute class. You provided {len(self.data.shape)}. If this is crucial to you, feel free to open an issue: https://github.com/shap/shap/issues.")
 
         # # warn users about large background data sets
         # if self.data.shape[0] > 100:
@@ -116,6 +128,14 @@ class Tabular(Masker):
                 return (pd.DataFrame(masked_inputs_out, columns=self.feature_names),), varying_rows_out
 
             return (masked_inputs_out,), varying_rows_out
+
+        if self.impute is not None:
+            if len(x.shape) == 1:
+                self.data = self.impute.transform(x.reshape(1, -1))
+            elif len(x.shape) == 2:
+                self.data = self.impute.transform(x)
+            elif len(x.shape) >= 2:
+                raise NotImplementedError(f"Currently only 1 and 2 dimensional data can by processed with the LinearImpute class. You provided {len(x.shape)}. If this is crucial to you, feel free to open an issue: https://github.com/shap/shap/issues.")
 
         # otherwise we update the whole set of masked data for a single sample
         self._masked_data[:] = x * mask + self.data * np.invert(mask)
@@ -299,24 +319,96 @@ class Partition(Tabular):
         super().__init__(data, max_samples=max_samples, clustering=clustering)
 
 
-class Impute(Masker): # we should inherit from Tabular once we add support for arbitrary masking
+class LinearImpute:
+    """ Simple class for imputing missing values using pandas.Series.interpolate.
+    """
+
+    def __init__(self, missing_value=0):
+        """ Build a linear imputer for Impute classes when method=linear
+
+        Parameters
+        ----------
+        missing_value : int, numpy.NaN
+            The missing value to impute.
+        """
+        self.missing_value = missing_value
+
+    def fit(self, data):
+        self.data = pd.DataFrame(data)
+
+    def transform(self, x):
+        """ Linearly impute missing values in the data and return as array.
+
+        Parameters
+        ----------
+        data : numpy.ndarray
+            Array to impute missing values for, should be masked
+            using missing_value.
+        """
+        self.x = x
+        if len(x.shape) == 1:
+            self.x = x.reshape(1, -1)
+        elif len(x.shape) > 2:
+            raise NotImplementedError(f"Currently only 1 and 2 dimensional data can by processed with the LinearImpute class. You provided {len(x.shape)}. If this is crucial to you, feel free to open an issue: https://github.com/shap/shap/issues.")
+        self.x = pd.DataFrame(self.x)
+        # Pandas interpolate uses NaN as missing value
+        self.x = self.x.replace(self.missing_value, np.NaN)
+        # number of imputed samples for indexing later
+        n_samples = self.x.shape[0]
+        # combine with background data for interpolation
+        interpolated = pd.concat([self.data, self.x], axis=0).interpolate(
+            method="linear",
+            limit_direction="both"
+        )
+
+        return interpolated.values[-n_samples]
+
+
+class Impute(Tabular):
     """ This imputes the values of missing features using the values of the observed features.
 
     Unlike Independent, Gaussian imputes missing values based on correlations with observed data points.
     """
 
-    def __init__(self, data, method="linear"):
+    def __init__(self, data, max_samples=100, method="mean"):
         """ Build a Partition masker with the given background data and clustering.
 
         Parameters
         ----------
-        data : numpy.ndarray, pandas.DataFrame or {"mean: numpy.ndarray, "cov": numpy.ndarray} dictionary
+        data : numpy.ndarray, pandas.DataFrame
             The background dataset that is used for masking.
-        """
-        if data is dict and "mean" in data:
-            self.mean = data.get("mean", None)
-            self.cov = data.get("cov", None)
-            data = np.expand_dims(data["mean"], 0)
 
-        self.data = data
-        self.method = method
+        max_samples : int
+            The maximum number of samples to use from the passed background data. If data has more
+            than max_samples then shap.utils.sample is used to subsample the dataset. The number of
+            samples coming out of the masker (to be integrated over) matches the number of samples in
+            the background dataset. This means larger background dataset cause longer runtimes. Normally
+            about 1, 10, 100, or 1000 background samples are reasonable choices.
+
+        method : string or sklearn.impute object
+            If a string, then this is shorthand for the type of sklearn.impute object to generate.
+            Either a SimpleImputer or KNNImputer is used with default settings.
+            Mean, median, and mode refer to the supported SimpleImputer strategies.
+            For more finetuning, pass an already initialized sklearn.impute object.
+            Supported methods are:
+                mean - SimpleImputer with elements replaced by mean of feature in data.
+                median - SimpleImputer with elements replaced by median of feature in data.
+                mode - SimpleImputer with elements replaced by most frequent of feature in data.
+                knn - KNNImputer with elements replaced by mean value within 5 NNs of feature in data.
+        """
+        methods = ["linear", "mean", "median", "most_frequent", "knn"]
+        if isinstance(method, str):
+            if method not in methods:
+                raise NotImplementedError(f"Given imputation method is not supported. Please provide one of the following methods: {', '.join(methods)}")
+            elif method == "knn":
+                impute = KNNImputer(missing_values=0)
+            elif method == "linear":
+                impute = LinearImpute(missing_value=0)
+            else:
+                impute = SimpleImputer(missing_values=0, strategy=method)
+        elif isinstance(method, Callable):
+            impute = method
+        else:
+            raise NotImplementedError(f"Given imputation method is not supported. Please provide one of the following methods: {', '.join(methods)}")
+
+        super().__init__(data, max_samples=max_samples, impute=impute)
